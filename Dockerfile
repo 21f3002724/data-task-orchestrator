@@ -24,7 +24,7 @@ ENV PATH="/root/.local/bin/:$PATH"
 
 WORKDIR /app
 
-COPY TaskApi.py /app
+COPY server.py /app
 
-CMD ["uv","run","TaskApi.py"]
+CMD ["uv","run","server.py"]
   
