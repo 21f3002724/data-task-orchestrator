@@ -7,7 +7,6 @@
 # 2 Publish your Docker image (using Dockerfile) publicly to Docker Hub. (Your Docker image uses the same Dockerfile as this file in your GitHub repository)
 # 3 Ensure Docker image is publicly accessible on and runs via podman run $IMAGE_NAME -e AIPROXY_TOKEN=$AIPROXY_TOKEN -p 8000:8000
 
-
 FROM python:3.12-slim-bookworm
 
 # The installer requires curl (and certificates) to download the release archive
@@ -27,4 +26,3 @@ WORKDIR /app
 COPY server.py /app
 
 CMD ["uv","run","server.py"]
-  
