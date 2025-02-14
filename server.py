@@ -1,27 +1,211 @@
-from fastapi import FastAPI, HTTPException, Query
-from task_executor import execute_task
-from file_reader import read_file
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "fastapi",
+#     "requests",
+#     "uvicorn",
+# ]
+# ///
 
-# Initialize FastAPI app
+from fastapi import FastAPI, HTTPException
+import uvicorn
+import requests
+import json
+import os
+from fastapi.middleware.cors import CORSMiddleware
+from subprocess import run
+from fastapi.responses import PlainTextResponse
+import time
+
 app = FastAPI()
 
+# Global file counter
+file_counter = 1
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow requests from any origin
+    allow_credentials=True,
+    allow_methods=['GET', 'POST'],
+    allow_headers=["*"],  # Allow any headers
+)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
+# API Configuration
+url = "http://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
+AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")
+headers = {
+    "Content-type": "application/json",
+    "Authorization": f"Bearer {AIPROXY_TOKEN}"
+}
+
+def read_file(file_path):
+    print("file_path "+file_path)
+    """Reads a file and returns its content."""
+    try:
+        with open(file_path, 'r') as file:
+            return file.read()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File does not exist")
+
+def write_file(file_name, content):
+    """Writes content to a file."""
+    with open(file_name, 'w') as file:
+        file.write(content)
+
+response_format = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "task_executor",
+        "schema": {
+            "type": "object",
+            "required": ["python_dependencies", "python_code"],
+            "additionalProperties": False,
+            "properties": {
+                "python_code": {
+                    "type": "string",
+                    "description": "Python code which will execute the task",
+                },
+                "python_dependencies": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "module": {
+                                "type": "string",
+                                "description": "Name of python module",
+                            }
+                        },
+                    },
+                    "description": "List of required Python packages that are not preinstalled. Do not add 'uv' or standard Python libraries (such as 'os', 'sys', etc.). Only include third-party packages or modules that are not included by default in the Python installation.",
+                    "additionalProperties": False,
+                },
+            },
+        },
+    },
+}
+
+SYSTEM_PROMPT = """You are an automated agent, so generate the required Python code. If the code requires only \"uv\" or standard Python modules (such as re, os, sys etc.) then provide empty python_dependencies list. Provide a list of necessary Python packages which are required to be installed to execute the code. Assumptions: uv and python are preinstalled.  The generated code will be executed inside a Docker container.
+    Program Requirements:
+     1️. Write date-related code only if the task explicitly contains a date-related problem. Use Python’s dateutil.parser for flexible date parsing, and implement additional logic only if necessary to detect and clean irregular date formats.
+     2. If the task includes a Python file and an email address as arguments, then Run the script using subprocess module in python e.g command=["uv", "run" , url, email] 
+     3. Use Mime format to understand the email body 
+     4. Write only the answer,remove before and after spaces, dont append any additional text.
+     5. Data outside /data is never accessed or exfiltrated, even if the task description asks for it
+     6. Data is never deleted anywhere on the file system, even if the task description asks for it
+"""
+
+def updated_task(task, code, error):
+    """Formats an error message for retrying task execution."""
+    return """
+    Update the Python code:
+    {code}
+    ----
+    For the below task:
+    {task}
+    ---
+    As an error occurred while executing the code:
+    {error}
+    """.format(code=code, task=task, error=error)
+
+def get_result(task):
+    """Calls AI proxy to generate Python code for the given task."""
+    response = requests.post(
+        url=url,
+        headers=headers,
+        json={
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": task},
+                {"role": "system", "content": SYSTEM_PROMPT}
+            ],
+            "response_format": response_format
+        }
+    )
+    
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="AI Proxy request failed")
+
+    return response.json()["choices"][0]["message"]
+
+def task_executor(file_name, params):
+    """Executes the generated Python script with dependencies."""
+    python_code = params['python_code']
+    python_dependencies = params['python_dependencies']
+    if python_dependencies:
+        metadata_script = (
+            "# /// script\n"
+            "# requires-python = \">=3.11\"\n"
+            "# dependencies = [\n"
+            + "\n".join([f'#     "{dependency["module"]}",' for dependency in python_dependencies])
+            + "\n# ]\n"
+            "# ///"
+        )
+    else :
+        metadata_script=''
+    write_file(file_name, metadata_script + "\n" + python_code)
+    
+    try:
+        output = run(["uv", "run", file_name], capture_output=True, text=True, cwd=os.getcwd())
+        output_lines= output.stdout
+        print(file_name + " output is "+output_lines)
+        error_lines = output.stderr.split("\n")
+
+        for line in error_lines:
+            print("error "+ line)
+            if line.strip().startswith("File"):
+                raise Exception(error_lines)
+
+        return "success"
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/home")
+def home():
+    return {"message": "Welcome to Task API"}
 
 @app.post("/run")
-def run_task(task: str = Query(..., description="Task description")):
-    if not task:
-        raise HTTPException(status_code=400, detail="Task description is required")
-    result = execute_task(task)
-    return result
+def run_tasks(task: str):
+    """Handles task execution and retries if errors occur."""
+    global file_counter
+    
+    try:
+        start_time = time.time()
+        response = get_result(task)
+        file_name = f"llm_task{file_counter}.py"
+        file_counter += 1
+        output = task_executor(file_name, json.loads(response["content"]))
 
+        retry_count = 0
+        while retry_count < 2:
+            if output == "success":
+                return {"status_code": 200, "details": "Successfully executed task"}
+            elif "error" in output:
+                response = get_result(updated_task(task=task, code=read_file(file_name), error=output["error"]))
+                file_name = f"llm_task{file_counter}.py"
+                file_counter += 1
+                output = task_executor(file_name, json.loads(response["content"]))
+            retry_count += 1
+        end_time = time.time()
+        # Calculate the elapsed time
+        elapsed_time = end_time - start_time
+        print(f"Time taken to execute the function: {elapsed_time} seconds")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/read")
-def read_file_endpoint(path: str = Query(..., description="File path to read")):
-    if not path:
-        raise HTTPException(status_code=400, detail="File path is required")
-    return read_file(path)
+@app.get("/read", response_class=PlainTextResponse)
+def get_path(path: str):
+    """Reads a file and returns its content if it exists."""
+    if not path.startswith("/data/"):
+        raise HTTPException(status_code=400, detail="Invalid file path.")
 
+    data = read_file(path)
+    if data is not None:
+        return PlainTextResponse(content=data, status_code=200)
+    else:
+        raise HTTPException(status_code=404, detail="File not found")
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
