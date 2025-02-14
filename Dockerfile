@@ -1,7 +1,6 @@
 #|| Shree Swami Samartha ||
-# Placeholder for Dockerfile
-# Replace file with original Dockerfile latter.
-
+# 
+# 
 # Tasks:
 # 1 Create a Dockerfile that builds your application.
 # 2 Publish your Docker image (using Dockerfile) publicly to Docker Hub. (Your Docker image uses the same Dockerfile as this file in your GitHub repository)
@@ -22,6 +21,8 @@ RUN sh /uv-installer.sh && rm /uv-installer.sh
 ENV PATH="/root/.local/bin/:$PATH"
 
 WORKDIR /app
+ 
+RUN mkdir -p /data
 
 COPY server.py /app
 
