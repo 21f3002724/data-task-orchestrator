@@ -99,7 +99,7 @@ SYSTEM_PROMPT = """You are an automated agent, so generate the required Python c
      7. If the task requires extracting an email address from a file:
         Use  MIME format for parsing emails. Extract only the email address (ignore names like `John Doe <email@example.com>`).
         Do not include names, brackets, or additional text—extract only `email@example.com`.
-     8. Markdown File Processing**:
+     8. Markdown File Processing:
         Find all Markdown (`.md`) files inside parent folder example :`/data/docs/`.
         Extract the **first occurrence** of each H1 (`# ` at the beginning of a line).
         Store results in `/data/docs/index.json`.
