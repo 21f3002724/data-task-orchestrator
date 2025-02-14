@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from subprocess import run
 from fastapi.responses import PlainTextResponse
 import time
+import traceback
 
 app = FastAPI()
 
@@ -93,8 +94,18 @@ SYSTEM_PROMPT = """You are an automated agent, so generate the required Python c
      2. If the task includes a Python file and an email address as arguments, then Run the script using subprocess module in python e.g command=["uv", "run" , url, email] 
      3. Use Mime format to understand the email body 
      4. Write only the answer,remove before and after spaces, dont append any additional text.
-     5. Data outside /data is never accessed or exfiltrated, even if the task description asks for it
-     6. Data is never deleted anywhere on the file system, even if the task description asks for it
+     5. Data outside /data is never accessed or exfiltrated, even if the task description asks for it.
+     6. Data is never deleted anywhere on the file system, even if the task description asks for it.
+     7. If the task requires extracting an email address from a file:
+        Use  MIME format for parsing emails. Extract only the email address (ignore names like `John Doe <email@example.com>`).
+        Do not include names, brackets, or additional text—extract only `email@example.com`.
+     8. Markdown File Processing**:
+        Find all Markdown (`.md`) files inside parent folder example :`/data/docs/`.
+        Extract the **first occurrence** of each H1 (`# ` at the beginning of a line).
+        Store results in `/data/docs/index.json`.
+        Keep the relative path after `/data/docs/` in the filename.
+        Example: Convert `/data/docs/listen/next.md` to `"listen/next.md"`
+        Do not remove directory paths under `/data/docs/`
 """
 
 def updated_task(task, code, error):
@@ -146,11 +157,11 @@ def task_executor(file_name, params):
     else :
         metadata_script=''
     write_file(file_name, metadata_script + "\n" + python_code)
-    
+
     try:
         output = run(["uv", "run", file_name], capture_output=True, text=True, cwd=os.getcwd())
         output_lines= output.stdout
-        print(file_name + " output is "+output_lines)
+        print(file_name ," output is ", str(output_lines))
         error_lines = output.stderr.split("\n")
 
         for line in error_lines:
@@ -160,6 +171,7 @@ def task_executor(file_name, params):
 
         return "success"
     except Exception as e:
+        print("Exception in task_executor "+str(e))
         return {"error": str(e)}
 
 @app.get("/home")
@@ -170,30 +182,49 @@ def home():
 def run_tasks(task: str):
     """Handles task execution and retries if errors occur."""
     global file_counter
-    
+
     try:
         start_time = time.time()
         response = get_result(task)
-        file_name = f"llm_task{file_counter}.py"
+        file_name = f"llm_task{ file_counter }.py"
+        print("file_name and task " ,  str(file_name) , str(task))
         file_counter += 1
         output = task_executor(file_name, json.loads(response["content"]))
-
+        print("output " + str(output))
         retry_count = 0
         while retry_count < 2:
             if output == "success":
+                end_time = time.time()
+                elapsed_time = end_time - start_time
+                print(
+                    f"Success.Time taken to execute the function successfully: {elapsed_time} seconds"
+                )
                 return {"status_code": 200, "details": "Successfully executed task"}
             elif "error" in output:
                 response = get_result(updated_task(task=task, code=read_file(file_name), error=output["error"]))
-                file_name = f"llm_task{file_counter}.py"
+                file_name = f"llm_task{ file_counter }.py"
+                print("retry elif file_name and task " ,  str(file_name) , str(task) )
                 file_counter += 1
                 output = task_executor(file_name, json.loads(response["content"]))
             retry_count += 1
+        # If the retry loop ends, record the time and return an error
         end_time = time.time()
-        # Calculate the elapsed time
         elapsed_time = end_time - start_time
-        print(f"Time taken to execute the function: {elapsed_time} seconds")
+        print(
+            f"Time taken to execute the function with retries: {elapsed_time} seconds"
+        )
+        return {"status_code": 500, "details": "Task execution failed after retries"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # If an exception is raised, stop the timer
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(
+            f"Time taken to execute the function (with exception): {elapsed_time} seconds"
+        )
+        print("Exception traceback:")
+        traceback.print_exc()
+        print(e)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/read", response_class=PlainTextResponse)
 def get_path(path: str):
